@@ -1,4 +1,4 @@
-#include "quirewise/comic.h"
+﻿#include "quirewise/comic.h"
 
 #include "quirewise/archive.h"
 #include "../../core/natural_sort.h"
@@ -126,7 +126,7 @@ static int comic_compare_pages(const void *left, const void *right)
 {
     const QwComicPage *a = (const QwComicPage *)left;
     const QwComicPage *b = (const QwComicPage *)right;
-    int order = qw_natural_name_compare((const char *)a->name_bytes,
+    int order = qw_comic_natural_name_compare((const char *)a->name_bytes,
                                         (const char *)b->name_bytes);
     if (!order) order = (a->ordinal > b->ordinal) - (a->ordinal < b->ordinal);
     return order;
