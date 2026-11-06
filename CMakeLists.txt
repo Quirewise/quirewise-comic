@@ -39,3 +39,12 @@ if(QUIREWISE_BUILD_SHARED AND WIN32)
         quirewise_comic
         PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(quirewise_comic_fuzz_smoke tests/comic_fuzz_smoke.c)
+    target_compile_features(quirewise_comic_fuzz_smoke PRIVATE c_std_11)
+    target_link_libraries(quirewise_comic_fuzz_smoke PRIVATE Quirewise::Comic)
+    add_test(NAME quirewise_comic_fuzz_smoke
+        COMMAND quirewise_comic_fuzz_smoke)
+endif()
