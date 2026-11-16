@@ -1,8 +1,10 @@
 ﻿#include "quirewise/comic.h"
 
 #include "quirewise/archive.h"
+#include "quirewise/seven_zip.h"
 #include "../../core/natural_sort.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +15,7 @@ typedef struct QwComicPage {
     size_t archive_index;
     size_t ordinal;
     const uint8_t *tar_data;
+    uint8_t *owned_data;
 } QwComicPage;
 
 struct QwComicArchive {
@@ -118,6 +121,7 @@ static int comic_add_page(QwComicArchive *archive, const uint8_t *name,
     archive->pages[archive->page_count].archive_index = archive_index;
     archive->pages[archive->page_count].ordinal = ordinal;
     archive->pages[archive->page_count].tar_data = tar_data;
+    archive->pages[archive->page_count].owned_data = NULL;
     ++archive->page_count;
     return 1;
 }
@@ -158,9 +162,183 @@ static void comic_release_contents(QwComicArchive *archive)
     if (!archive) return;
     if (archive->zip) qw_zip_archive_close(archive->zip);
     free(archive->password);
-    for (size_t i = 0u; i < archive->page_count; ++i)
+    for (size_t i = 0u; i < archive->page_count; ++i) {
         free(archive->pages[i].name_bytes);
+        free(archive->pages[i].owned_data);
+    }
     free(archive->pages);
+}
+
+
+typedef struct ComicSevenItem {
+    char *name;
+    size_t name_size;
+    uint8_t *data;
+    size_t size;
+    size_t capacity;
+    int failed;
+} ComicSevenItem;
+
+typedef struct ComicSevenCollect {
+    QwComicArchive *archive;
+    ComicSevenItem *items;
+    size_t count;
+    size_t capacity;
+    size_t total_size;
+    int oom;
+} ComicSevenCollect;
+
+static int comic_seven_add_item(ComicSevenCollect *collect, const char *name,
+                                size_t name_size, size_t size,
+                                ComicSevenItem **out_item)
+{
+    ComicSevenItem *items;
+    ComicSevenItem *item;
+    char *copy;
+    if (collect->count >= 65536u || name_size > 4096u) return 0;
+    if (collect->count >= collect->capacity) {
+        size_t next = collect->capacity ? collect->capacity * 2u : 16u;
+        items = (ComicSevenItem *)realloc(collect->items,
+                                          next * sizeof(*items));
+        if (!items) return 0;
+        collect->items = items;
+        collect->capacity = next;
+    }
+    item = &collect->items[collect->count];
+    memset(item, 0, sizeof(*item));
+    copy = (char *)malloc(name_size + 1u);
+    if (!copy) return 0;
+    memcpy(copy, name, name_size);
+    copy[name_size] = '\0';
+    item->name = copy;
+    item->name_size = name_size;
+    if (size) {
+        item->data = (uint8_t *)malloc(size);
+        if (!item->data) {
+            free(copy);
+            return 0;
+        }
+        item->capacity = size;
+    }
+    ++collect->count;
+    *out_item = item;
+    return 1;
+}
+
+static int comic_seven_begin(void *context, uint32_t archive_index,
+                             const char *utf8_name, uint64_t declared_size,
+                             int is_directory, void **out_entry)
+{
+    ComicSevenCollect *collect = (ComicSevenCollect *)context;
+    ComicSevenItem *item = NULL;
+    (void)archive_index;
+    if (out_entry) *out_entry = NULL;
+    if (!collect || !utf8_name || is_directory) return 0;
+    if (!comic_name_is_image((const uint8_t *)utf8_name, strlen(utf8_name)))
+        return 0;
+    if (declared_size > 128u * 1024u * 1024u ||
+        collect->total_size + declared_size > 512u * 1024u * 1024u)
+        return 1;
+    collect->total_size += (size_t)declared_size;
+    if (!comic_seven_add_item(collect, utf8_name, strlen(utf8_name),
+                              (size_t)declared_size, &item)) {
+        collect->oom = 1;
+        return 1;
+    }
+    if (out_entry) *out_entry = item;
+    return 0;
+}
+
+static int comic_seven_write(void *context, void *entry, const void *data,
+                             size_t size)
+{
+    ComicSevenItem *item = (ComicSevenItem *)entry;
+    size_t needed;
+    (void)context;
+    if (!item) return 0;
+    needed = item->size + size;
+    if (needed > item->capacity) {
+        size_t capacity = item->capacity ? item->capacity : 4096u;
+        uint8_t *grown;
+        while (capacity < needed) capacity *= 2u;
+        grown = (uint8_t *)realloc(item->data, capacity);
+        if (!grown) {
+            item->failed = 1;
+            return 1;
+        }
+        item->data = grown;
+        item->capacity = capacity;
+    }
+    memcpy(item->data + item->size, data, size);
+    item->size += size;
+    return 0;
+}
+
+static void comic_seven_finish(void *context, void *entry, int operation_result)
+{
+    (void)context;
+    if (entry && operation_result) ((ComicSevenItem *)entry)->failed = 1;
+}
+
+static void comic_seven_dispose(ComicSevenCollect *collect)
+{
+    size_t index;
+    if (!collect) return;
+    for (index = 0u; index < collect->count; ++index) {
+        free(collect->items[index].name);
+        free(collect->items[index].data);
+    }
+    free(collect->items);
+    memset(collect, 0, sizeof(*collect));
+}
+
+static QwComicStatus comic_open_seven_zip(QwComicArchive *archive,
+                                          const uint8_t *data, size_t size,
+                                          const char *password)
+{
+    ComicSevenCollect collect;
+    QwSevenZipSink sink;
+    QwSevenZipStatus status;
+    size_t index;
+    int success = 0;
+    memset(&collect, 0, sizeof(collect));
+    collect.archive = archive;
+    memset(&sink, 0, sizeof(sink));
+    sink.context = &collect;
+    sink.begin = comic_seven_begin;
+    sink.write = comic_seven_write;
+    sink.finish = comic_seven_finish;
+    status = qw_seven_zip_extract(data, size, password, &sink);
+    if (collect.oom) {
+        comic_seven_dispose(&collect);
+        return QW_COMIC_ERR_OUT_OF_MEMORY;
+    }
+    if (status != QW_SEVEN_ZIP_OK) {
+        comic_seven_dispose(&collect);
+        if (status == QW_SEVEN_ZIP_UNSUPPORTED)
+            return QW_COMIC_ERR_UNSUPPORTED;
+        if (status == QW_SEVEN_ZIP_RESOURCE_LIMIT)
+            return QW_COMIC_ERR_RESOURCE_LIMIT;
+        if (status == QW_SEVEN_ZIP_OUT_OF_MEMORY)
+            return QW_COMIC_ERR_OUT_OF_MEMORY;
+        return QW_COMIC_ERR_EXTRACT;
+    }
+    for (index = 0u; index < collect.count; ++index) {
+        ComicSevenItem *item = &collect.items[index];
+        QwComicPage *page;
+        if (item->failed || !item->data) continue;
+        if (!comic_add_page(archive, (const uint8_t *)item->name,
+                            item->name_size, item->size, 0u, index, NULL)) {
+            comic_seven_dispose(&collect);
+            return QW_COMIC_ERR_OUT_OF_MEMORY;
+        }
+        page = &archive->pages[archive->page_count - 1u];
+        page->owned_data = item->data;
+        item->data = NULL;
+        success = 1;
+    }
+    comic_seven_dispose(&collect);
+    return success ? QW_COMIC_OK : QW_COMIC_ERR_FORMAT;
 }
 
 QwComicStatus qw_comic_archive_open(const void *data, size_t size,
@@ -172,7 +350,8 @@ QwComicStatus qw_comic_archive_open(const void *data, size_t size,
     if (!out_archive) return QW_COMIC_ERR_INVALID_ARGUMENT;
     *out_archive = NULL;
     if (!data || !size) return QW_COMIC_ERR_INVALID_ARGUMENT;
-    if (format != QW_COMIC_ARCHIVE_ZIP && format != QW_COMIC_ARCHIVE_USTAR)
+    if (format != QW_COMIC_ARCHIVE_ZIP && format != QW_COMIC_ARCHIVE_USTAR &&
+        format != QW_COMIC_ARCHIVE_SEVEN_ZIP)
         return QW_COMIC_ERR_UNSUPPORTED;
     archive = (QwComicArchive *)calloc(1u, sizeof(*archive));
     if (!archive) return QW_COMIC_ERR_OUT_OF_MEMORY;
@@ -189,7 +368,15 @@ QwComicStatus qw_comic_archive_open(const void *data, size_t size,
         }
         memcpy(archive->password, password, length + 1u);
     }
-    if (format == QW_COMIC_ARCHIVE_ZIP) {
+    if (format == QW_COMIC_ARCHIVE_SEVEN_ZIP) {
+        QwComicStatus seven_status = comic_open_seven_zip(
+            archive, (const uint8_t *)data, size, password);
+        if (seven_status != QW_COMIC_OK) {
+            comic_release_contents(archive);
+            free(archive);
+            return seven_status;
+        }
+    } else if (format == QW_COMIC_ARCHIVE_ZIP) {
         size_t count;
         const char *error = NULL;
         QwArchiveStatus status = qw_zip_archive_open(
@@ -293,6 +480,17 @@ QwComicStatus qw_comic_archive_read_page(QwComicArchive *archive,
     page = &archive->pages[page_index];
     if (page->uncompressed_size > SIZE_MAX)
         return QW_COMIC_ERR_RESOURCE_LIMIT;
+    if (archive->format == QW_COMIC_ARCHIVE_SEVEN_ZIP) {
+        uint8_t *copy = (uint8_t *)malloc(page->uncompressed_size
+                                              ? (size_t)page->uncompressed_size
+                                              : 1u);
+        if (!copy) return QW_COMIC_ERR_OUT_OF_MEMORY;
+        if (page->uncompressed_size)
+            memcpy(copy, page->owned_data, (size_t)page->uncompressed_size);
+        *out_data = copy;
+        *out_size = (size_t)page->uncompressed_size;
+        return QW_COMIC_OK;
+    }
     if (archive->format == QW_COMIC_ARCHIVE_USTAR) {
         uint8_t *copy = (uint8_t *)malloc(page->uncompressed_size
                                               ? (size_t)page->uncompressed_size

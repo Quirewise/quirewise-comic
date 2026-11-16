@@ -39,7 +39,14 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(quirewise_comic_fuzz_smoke tests/comic_fuzz_smoke.c)
+    add_executable(quirewise_comic_cb7_test tests/cb7_test.c)
+target_compile_features(quirewise_comic_cb7_test PRIVATE c_std_11)
+target_compile_definitions(quirewise_comic_cb7_test PRIVATE
+    QUIREWISE_CB7_SAMPLE="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/sample.cb7")
+target_link_libraries(quirewise_comic_cb7_test PRIVATE Quirewise::Comic)
+add_test(NAME quirewise_comic_cb7 COMMAND quirewise_comic_cb7_test)
+
+add_executable(quirewise_comic_fuzz_smoke tests/comic_fuzz_smoke.c)
     target_compile_features(quirewise_comic_fuzz_smoke PRIVATE c_std_11)
     target_link_libraries(quirewise_comic_fuzz_smoke PRIVATE Quirewise::Comic)
     add_test(NAME quirewise_comic_fuzz_smoke
