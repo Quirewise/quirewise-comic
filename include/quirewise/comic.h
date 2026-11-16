@@ -21,7 +21,8 @@ typedef enum QwComicStatus {
 typedef enum QwComicArchiveFormat {
     QW_COMIC_ARCHIVE_ZIP = 1,
     QW_COMIC_ARCHIVE_USTAR = 2,
-    QW_COMIC_ARCHIVE_SEVEN_ZIP = 3
+    QW_COMIC_ARCHIVE_SEVEN_ZIP = 3,
+    QW_COMIC_ARCHIVE_RAR = 4
 } QwComicArchiveFormat;
 
 typedef struct QwComicArchive QwComicArchive;

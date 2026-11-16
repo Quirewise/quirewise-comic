@@ -1,6 +1,7 @@
 ﻿#include "quirewise/comic.h"
 
 #include "quirewise/archive.h"
+#include "quirewise/rar.h"
 #include "quirewise/seven_zip.h"
 #include "../../core/natural_sort.h"
 
@@ -341,6 +342,75 @@ static QwComicStatus comic_open_seven_zip(QwComicArchive *archive,
     return success ? QW_COMIC_OK : QW_COMIC_ERR_FORMAT;
 }
 
+
+typedef struct ComicRarCollect {
+    QwComicArchive *archive;
+    size_t ordinal;
+    int unsupported;
+    int oom;
+} ComicRarCollect;
+
+static QwRarVisitAction comic_rar_visit(void *context,
+                                        const QwRarEntryView *entry)
+{
+    ComicRarCollect *collect = (ComicRarCollect *)context;
+    if (!collect || !entry) return QW_RAR_VISIT_STOP;
+    if (entry->is_directory || !entry->name || !entry->name_size ||
+        memchr(entry->name, 0, entry->name_size) ||
+        !comic_name_is_image(entry->name, entry->name_size))
+        return QW_RAR_VISIT_CONTINUE;
+    if (!entry->is_stored || entry->packed_size != entry->uncompressed_size ||
+        !entry->packed_data || !entry->packed_size) {
+        collect->unsupported = 1;
+        return QW_RAR_VISIT_CONTINUE;
+    }
+    if (entry->uncompressed_size > 128u * 1024u * 1024u) {
+        collect->oom = 1;
+        return QW_RAR_VISIT_STOP;
+    }
+    if (!comic_add_page(collect->archive, entry->name, entry->name_size,
+                        entry->uncompressed_size, 0u, collect->ordinal++,
+                        NULL)) {
+        collect->oom = 1;
+        return QW_RAR_VISIT_STOP;
+    }
+    {
+        QwComicPage *page =
+            &collect->archive->pages[collect->archive->page_count - 1u];
+        page->owned_data = (uint8_t *)malloc((size_t)entry->uncompressed_size);
+        if (!page->owned_data) {
+            collect->oom = 1;
+            return QW_RAR_VISIT_STOP;
+        }
+        memcpy(page->owned_data, entry->packed_data,
+               (size_t)entry->uncompressed_size);
+    }
+    return QW_RAR_VISIT_CONTINUE;
+}
+
+static QwComicStatus comic_open_rar(QwComicArchive *archive,
+                                    const uint8_t *data, size_t size)
+{
+    ComicRarCollect collect;
+    QwRarParseLimits limits;
+    QwRarStatus status;
+    memset(&collect, 0, sizeof(collect));
+    collect.archive = archive;
+    limits.max_entries = 65536u;
+    limits.max_entry_bytes = 128u * 1024u * 1024u;
+    limits.max_total_bytes = 512u * 1024u * 1024u;
+    status = qw_rar_archive_visit(data, size, &limits, comic_rar_visit,
+                                  &collect);
+    if (collect.oom) return QW_COMIC_ERR_OUT_OF_MEMORY;
+    if (status == QW_RAR_ERR_RESOURCE_LIMIT)
+        return QW_COMIC_ERR_RESOURCE_LIMIT;
+    if (status != QW_RAR_OK && status != QW_RAR_STOPPED)
+        return status == QW_RAR_ERR_UNSUPPORTED ? QW_COMIC_ERR_UNSUPPORTED
+                                                : QW_COMIC_ERR_FORMAT;
+    if (collect.unsupported) return QW_COMIC_ERR_UNSUPPORTED;
+    return archive->page_count ? QW_COMIC_OK : QW_COMIC_ERR_FORMAT;
+}
+
 QwComicStatus qw_comic_archive_open(const void *data, size_t size,
                                    QwComicArchiveFormat format,
                                    const char *password,
@@ -351,7 +421,8 @@ QwComicStatus qw_comic_archive_open(const void *data, size_t size,
     *out_archive = NULL;
     if (!data || !size) return QW_COMIC_ERR_INVALID_ARGUMENT;
     if (format != QW_COMIC_ARCHIVE_ZIP && format != QW_COMIC_ARCHIVE_USTAR &&
-        format != QW_COMIC_ARCHIVE_SEVEN_ZIP)
+        format != QW_COMIC_ARCHIVE_SEVEN_ZIP &&
+        format != QW_COMIC_ARCHIVE_RAR)
         return QW_COMIC_ERR_UNSUPPORTED;
     archive = (QwComicArchive *)calloc(1u, sizeof(*archive));
     if (!archive) return QW_COMIC_ERR_OUT_OF_MEMORY;
@@ -368,7 +439,15 @@ QwComicStatus qw_comic_archive_open(const void *data, size_t size,
         }
         memcpy(archive->password, password, length + 1u);
     }
-    if (format == QW_COMIC_ARCHIVE_SEVEN_ZIP) {
+    if (format == QW_COMIC_ARCHIVE_RAR) {
+        QwComicStatus rar_status = comic_open_rar(
+            archive, (const uint8_t *)data, size);
+        if (rar_status != QW_COMIC_OK) {
+            comic_release_contents(archive);
+            free(archive);
+            return rar_status;
+        }
+    } else if (format == QW_COMIC_ARCHIVE_SEVEN_ZIP) {
         QwComicStatus seven_status = comic_open_seven_zip(
             archive, (const uint8_t *)data, size, password);
         if (seven_status != QW_COMIC_OK) {
@@ -480,7 +559,8 @@ QwComicStatus qw_comic_archive_read_page(QwComicArchive *archive,
     page = &archive->pages[page_index];
     if (page->uncompressed_size > SIZE_MAX)
         return QW_COMIC_ERR_RESOURCE_LIMIT;
-    if (archive->format == QW_COMIC_ARCHIVE_SEVEN_ZIP) {
+    if (archive->format == QW_COMIC_ARCHIVE_RAR ||
+        archive->format == QW_COMIC_ARCHIVE_SEVEN_ZIP) {
         uint8_t *copy = (uint8_t *)malloc(page->uncompressed_size
                                               ? (size_t)page->uncompressed_size
                                               : 1u);
