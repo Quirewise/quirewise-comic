@@ -22,6 +22,10 @@ metadata, does not write archives, and does not support CBR (RAR) or CB7 (7z)
 containers. It also does not sniff the container format: you pass
 `QW_COMIC_ARCHIVE_ZIP` or `QW_COMIC_ARCHIVE_USTAR` explicitly.
 
+The application's comic conversion route additionally reads **stored-entry** CBR
+and CB7 through `Quirewise::Archive`; those containers are not part of the
+`Quirewise::Comic` API, and compressed RAR payloads remain unsupported.
+
 ## Requirements
 
 - C11 compiler and CMake 3.21 or newer.
