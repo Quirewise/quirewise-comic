@@ -42,9 +42,12 @@ QwComicStatus qw_comic_archive_open(const void *data, size_t size,
                                    QwComicArchiveFormat format,
                                    const char *password,
                                    QwComicArchive **out_archive);
+/*! Return the archive container format (ZIP, TAR, 7z, ...). */
 QwComicArchiveFormat qw_comic_archive_format(
     const QwComicArchive *archive);
+/*! Return the number of pages in the archive. */
 size_t qw_comic_archive_page_count(const QwComicArchive *archive);
+/*! Fill one page's name, byte size and dimensions. */
 QwComicStatus qw_comic_archive_page_info(const QwComicArchive *archive,
                                          size_t page_index,
                                          QwComicPageInfo *out_info);
@@ -54,7 +57,9 @@ QwComicStatus qw_comic_archive_read_page(QwComicArchive *archive,
                                          size_t page_index,
                                          uint8_t **out_data,
                                          size_t *out_size);
+/*! Release a document returned by the parser; NULL is accepted. */
 void qw_comic_page_data_free(uint8_t *data);
+/*! Close an archive opened by the reader; NULL is accepted. */
 void qw_comic_archive_close(QwComicArchive *archive);
 
 #ifdef __cplusplus
